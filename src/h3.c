@@ -49,6 +49,9 @@ static void h3_trace(enum trace_level level, uint64_t mask,
                      const struct ist where, const struct ist func,
                      const void *a1, const void *a2, const void *a3, const void *a4);
 
+static void h3_trace_fill_ctx(struct trace_ctx *ctx, const struct trace_source *src,
+                              const void *a1, const void *a2, const void *a3, const void *a4);
+
 static const struct trace_event h3_trace_events[] = {
 #define           H3_EV_RX_FRAME      (1ULL <<  0)
 	{ .mask = H3_EV_RX_FRAME,     .name = "rx_frame",    .desc = "receipt of any H3 frame" },
@@ -99,6 +102,7 @@ struct trace_source trace_h3 = {
 	.desc = "HTTP/3 transcoder",
 	.arg_def = TRC_ARG1_CONN,  /* TRACE()'s first argument is always a connection */
 	.default_cb = h3_trace,
+	.fill_ctx = h3_trace_fill_ctx,
 	.known_events = h3_trace_events,
 	.lockon_args = h3_trace_lockon_args,
 	.decoding = h3_trace_decoding,
@@ -2504,6 +2508,28 @@ static void h3_trace(enum trace_level level, uint64_t mask,
 			chunk_appendf(&trace_buf, " h3s.dem=%s/%llu",
 			              h3_ft_str(h3s->demux_frame_type), (ull)h3s->demux_frame_len);
 		}
+	}
+}
+
+/* This fills the trace_ctx with extra info guessed from the args */
+static void h3_trace_fill_ctx(struct trace_ctx *ctx, const struct trace_source *src,
+                              const void *a1, const void *a2, const void *a3, const void *a4)
+{
+	const struct connection *conn = a1;
+	const struct qcc *qcc   = conn ? conn->ctx : NULL;
+	const struct qcs *qcs   = a2;
+
+	if (!ctx->conn)
+		ctx->conn = conn;
+
+	if (qcc) {
+		if (!ctx->fe)
+			ctx->fe = qcc->proxy;
+	}
+
+	if (qcs) {
+		if (!ctx->strm && qcs->sd && qcs->sd->sc)
+			ctx->strm = sc_strm(qcs->sd->sc);
 	}
 }
 
