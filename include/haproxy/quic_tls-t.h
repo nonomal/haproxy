@@ -17,6 +17,7 @@
 #error "Must define USE_OPENSSL"
 #endif
 
+#include <haproxy/openssl-compat.h>
 #include <openssl/evp.h>
 
 #include <import/ebtree.h>
@@ -24,7 +25,6 @@
 #include <haproxy/buf-t.h>
 #include <haproxy/ncbuf-t.h>
 #include <haproxy/quic_ack-t.h>
-#include <haproxy/openssl-compat.h>
 
 /* Use EVP_CIPHER or EVP_AEAD API depending on the library */
 #if defined(USE_OPENSSL_AWSLC)
