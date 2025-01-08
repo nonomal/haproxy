@@ -39,6 +39,19 @@ struct cpu_set_cfg {
 	struct hap_cpuset drop_threads;
 } cpu_set_cfg;
 
+/* list of CPU selection strategies for "cpu-selection". The default one
+ * is the first one.
+ */
+static struct ha_cpu_selection ha_cpu_selection[] = {
+	[0] = { .name = "balanced",    .desc = "Use biggest CPUs grouped by locality first",    _cmp_cpu_balanced    },
+	[1] = { .name = "performance", .desc = "Optimize for maximized CPU performance",        _cmp_cpu_performance },
+	[2] = { .name = "low-latency", .desc = "Optimize for minimized CPU latency",            _cmp_cpu_low_latency },
+	[3] = { .name = "locality",    .desc = "Arrange by locality only",                      _cmp_cpu_locality    },
+	[4] = { .name = "resource",    .desc = "Lowest resource usage",                         _cmp_cpu_resource    },
+	[5] = { .name = "all",         .desc = "Use all available CPUs in the system's order",  _cmp_cpu_index       },
+};
+
+
 /* Detects CPUs that are online on the system. It may rely on FS access (e.g.
  * /sys on Linux). Returns the number of CPUs detected or 0 if the detection
  * failed.
@@ -920,6 +933,12 @@ void cpu_reorder_by_cluster_capa(struct ha_cpu_topo *topo, int entries)
 	qsort(topo, entries, sizeof(*topo), _cmp_cpu_cluster_capa);
 }
 
+/* arrange a CPU topology array according to the configured selection strategy */
+void cpu_optimize_topology(struct ha_cpu_topo *topo, int entries)
+{
+	qsort(topo, entries, sizeof(*topo), ha_cpu_selection[global.cpu_sel].cmp_cpu);
+}
+
 /* This function is responsible for trying to fill in the missing info after
  * topology detection.
  */
@@ -1558,6 +1577,36 @@ static int cfg_parse_cpu_set(char **args, int section_type, struct proxy *curpx,
 	return -1;
 }
 
+/* Parse the "cpu-selection" global directive, which takes the name of one
+ * of the ha_cpu_selection[] names, and sets the associated index in
+ * global.cpusel.
+ */
+static int cfg_parse_cpu_selection(char **args, int section_type, struct proxy *curpx,
+                                   const struct proxy *defpx, const char *file, int line,
+                                   char **err)
+{
+	int i;
+
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	for (i = 0; i < sizeof(ha_cpu_selection) / sizeof(ha_cpu_selection[0]); i++) {
+		if (strcmp(args[1], ha_cpu_selection[i].name) == 0) {
+			global.cpu_sel = i;
+			return 0;
+		}
+	}
+
+	memprintf(err, "'%s' passed an unknown CPU selection strategy '%s'. Supported values are:", args[0], args[1]);
+	for (i = 0; i < sizeof(ha_cpu_selection) / sizeof(ha_cpu_selection[0]); i++) {
+		memprintf(err, "%s%s '%s'%s", *err,
+		          (i > 0 && i == sizeof(ha_cpu_selection) / sizeof(ha_cpu_selection[0]) - 1) ? " and" : "",
+		          ha_cpu_selection[i].name,
+		          (i == sizeof(ha_cpu_selection) / sizeof(ha_cpu_selection[0]) - 1) ? ".\n" : ",");
+	}
+	return -1;
+}
+
 /* Allocates everything needed to store CPU topology at boot.
  * Returns non-zero on success, zero on failure.
  */
@@ -1620,6 +1669,7 @@ REGISTER_POST_DEINIT(cpu_topo_deinit);
 
 /* config keyword parsers */
 static struct cfg_kw_list cfg_kws = {ILH, {
+	{ CFG_GLOBAL, "cpu-selection",  cfg_parse_cpu_selection, 0 },
 	{ CFG_GLOBAL, "cpu-set",  cfg_parse_cpu_set, 0 },
 	{ 0, NULL, NULL }
 }};
