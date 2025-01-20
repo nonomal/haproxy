@@ -193,6 +193,7 @@ resume_execution:
 					case ACT_RET_ABRT:
 						s->last_entity.type = STRM_ENTITY_RULE;
 						s->last_entity.ptr  = rule;
+						stream_report_term_evt(s->scf, strm_tevt_type_intercepted);
 						goto abort;
 					case ACT_RET_ERR:
 						s->last_entity.type = STRM_ENTITY_RULE;
@@ -248,6 +249,7 @@ resume_execution:
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.denied_req);
 	if (sess->listener && sess->listener->counters)
 		_HA_ATOMIC_INC(&sess->listener->counters->denied_req);
+	stream_report_term_evt(s->scf, strm_tevt_type_intercepted);
 	goto reject;
 
  internal:
@@ -256,12 +258,14 @@ resume_execution:
 		_HA_ATOMIC_INC(&sess->listener->counters->internal_errors);
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_INTERNAL;
+	stream_report_term_evt(s->scf, strm_tevt_type_internal_err);
 	goto reject;
 
  invalid:
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.failed_req);
 	if (sess->listener && sess->listener->counters)
 		_HA_ATOMIC_INC(&sess->listener->counters->failed_req);
+	stream_report_term_evt(s->scf, strm_tevt_type_proto_err);
 
  reject:
 	sc_must_kill_conn(s->scf);
@@ -269,7 +273,6 @@ resume_execution:
 
  abort:
 	// XXX: All errors are handled as intercepted here !
-	stream_report_term_evt(s->scf, tevt_loc_strm, tevt_type_intercepted);
 	req->analysers &= AN_REQ_FLT_END;
 	s->current_rule = s->current_rule_list = NULL;
 	req->analyse_exp = s->rules_exp = TICK_ETERNITY;
@@ -387,6 +390,7 @@ resume_execution:
 					case ACT_RET_ABRT:
 						s->last_entity.type = STRM_ENTITY_RULE;
 						s->last_entity.ptr  = rule;
+						stream_report_term_evt(s->scb, strm_tevt_type_intercepted);
 						goto abort;
 					case ACT_RET_ERR:
 						s->last_entity.type = STRM_ENTITY_RULE;
@@ -453,6 +457,7 @@ resume_execution:
 		_HA_ATOMIC_INC(&s->sess->listener->counters->denied_resp);
 	if (objt_server(s->target))
 		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.denied_resp);
+	stream_report_term_evt(s->scb, strm_tevt_type_intercepted);
 	goto reject;
 
  internal:
@@ -464,20 +469,20 @@ resume_execution:
 		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.internal_errors);
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_INTERNAL;
+	stream_report_term_evt(s->scf, strm_tevt_type_internal_err);
 	goto reject;
 
  invalid:
 	_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
 	if (objt_server(s->target))
 		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.failed_resp);
+	stream_report_term_evt(s->scf, strm_tevt_type_proto_err);
 
  reject:
 	sc_must_kill_conn(s->scb);
 	stream_abort(s);
 
   abort:
-	// XXX: All errors are handled as intercepted here !
-	stream_report_term_evt(s->scb, tevt_loc_strm, tevt_type_intercepted);
 	rep->analysers &= AN_RES_FLT_END;
 	s->current_rule = s->current_rule_list = NULL;
 	rep->analyse_exp = s->rules_exp = TICK_ETERNITY;
