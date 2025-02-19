@@ -17,6 +17,8 @@
 		_qcc_report_glitch(qcc, inc); 		\
 	})
 
+int qmux_is_quic(const struct qcc *qcc);
+
 void qcc_set_error(struct qcc *qcc, int err, int app);
 int _qcc_report_glitch(struct qcc *qcc, int inc);
 struct qcs *qcc_init_stream_local(struct qcc *qcc, int bidi);
