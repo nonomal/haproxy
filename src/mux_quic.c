@@ -155,6 +155,7 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	qcs->rx.ncbuf = NCBUF_NULL;
 	qcs->rx.app_buf = BUF_NULL;
 	qcs->rx.offset = qcs->rx.offset_max = 0;
+	qcs->rx.underrun = 0;
 
 	if (quic_stream_is_bidi(id)) {
 		qcs->rx.msd = quic_stream_is_local(qcc, id) ? qcc->lfctl.msd_bidi_l :
@@ -3294,6 +3295,8 @@ static size_t qmux_strm_rcv_buf(struct stconn *sc, struct buffer *buf,
 	TRACE_ENTER(QMUX_EV_STRM_RECV, qcc->conn, qcs);
 
 	ret = qcs_http_rcv_buf(qcs, buf, count, &fin);
+	if (!ret && qcs->rx.offset_max)
+		++qcs->rx.underrun;
 
 	if (b_data(&qcs->rx.app_buf)) {
 		se_fl_set(qcs->sd, SE_FL_RCV_MORE | SE_FL_WANT_ROOM);

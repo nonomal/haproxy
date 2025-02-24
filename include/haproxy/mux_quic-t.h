@@ -151,6 +151,7 @@ struct qcs {
 		struct buffer app_buf; /* receive buffer used by stconn layer */
 		uint64_t msd; /* current max-stream-data limit to enforce */
 		uint64_t msd_init; /* initial max-stream-data */
+		uint64_t underrun;
 	} rx;
 	struct {
 		struct quic_fctl fc; /* stream flow control applied on sending */
