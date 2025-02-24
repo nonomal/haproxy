@@ -139,7 +139,7 @@ enum qcs_state {
 
 struct qcs_rxbuf {
 	struct ncbuf ncbuf;
-	uint64_t offset;
+	struct eb64_node offset;
 };
 
 struct qcs {
@@ -152,7 +152,7 @@ struct qcs {
 	struct {
 		uint64_t offset; /* absolute current base offset of ncbuf */
 		uint64_t offset_max; /* maximum absolute offset received */
-		struct qcs_rxbuf *rxbuf;
+		struct eb_root rxbufs;
 		struct buffer app_buf; /* receive buffer used by stconn layer */
 		uint64_t msd; /* current max-stream-data limit to enforce */
 		uint64_t msd_init; /* initial max-stream-data */

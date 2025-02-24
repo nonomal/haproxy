@@ -44,26 +44,38 @@ static int qcc_is_pacing_active(const struct connection *conn)
 	return !(quic_tune.options & QUIC_TUNE_NO_PACING);
 }
 
+static struct ncbuf *qcs_first_rxbuf(struct qcs *qcs)
+{
+	struct eb64_node *node;
+	struct qcs_rxbuf *rxbuf;
+
+	node = eb64_first(&qcs->rx.rxbufs);
+	rxbuf = container_of(node, struct qcs_rxbuf, offset);
+	return &rxbuf->ncbuf;
+}
+
 static void qcs_free_ncbuf(struct qcs *qcs)
 {
+	struct eb64_node *node;
 	struct qcs_rxbuf *rxbuf;
 	struct ncbuf *ncbuf;
 	struct buffer buf;
 
-	rxbuf = qcs->rx.rxbuf;
-	if (!rxbuf)
+	if (eb_is_empty(&qcs->rx.rxbufs))
 		return;
 
-	ncbuf = &rxbuf->ncbuf;
+	node = eb64_first(&qcs->rx.rxbufs);
+	rxbuf = container_of(node, struct qcs_rxbuf, offset);
 
+	ncbuf = &rxbuf->ncbuf;
 	if (!ncb_is_null(ncbuf)) {
 		buf = b_make(ncbuf->area, ncbuf->size, 0, 0);
 		b_free(&buf);
 		offer_buffers(NULL, 1);
 	}
 
+	eb64_delete(node);
 	free(rxbuf);
-	qcs->rx.rxbuf = NULL;
 
 	/* Reset DEM_FULL as buffer is released. This ensures mux is not woken
 	 * up from rcv_buf stream callback when demux was previously blocked.
@@ -105,7 +117,8 @@ static void qcs_free(struct qcs *qcs)
 	}
 
 	/* Free Rx buffer. */
-	qcs_free_ncbuf(qcs);
+	while (!eb_is_empty(&qcs->rx.rxbufs))
+		qcs_free_ncbuf(qcs);
 
 	/* Remove qcs from qcc tree. */
 	eb64_delete(&qcs->by_id);
@@ -160,7 +173,7 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 		qfctl_init(&qcs->tx.fc, 0);
 	}
 
-	qcs->rx.rxbuf = NULL;
+	qcs->rx.rxbufs = EB_ROOT_UNIQUE;
 	qcs->rx.app_buf = BUF_NULL;
 	qcs->rx.offset = qcs->rx.offset_max = 0;
 	qcs->rx.underrun = 0;
@@ -1096,11 +1109,12 @@ static void qcs_consume(struct qcs *qcs, uint64_t bytes)
 {
 	struct qcc *qcc = qcs->qcc;
 	struct quic_frame *frm;
-	struct ncbuf *buf = &qcs->rx.rxbuf->ncbuf;
+	struct ncbuf *buf;
 	enum ncb_ret ret;
 
 	TRACE_ENTER(QMUX_EV_QCS_RECV, qcc->conn, qcs);
 
+	buf = qcs_first_rxbuf(qcs);
 	ret = ncb_advance(buf, bytes);
 	if (ret) {
 		ABORT_NOW(); /* should not happens because removal only in data */
@@ -1159,6 +1173,7 @@ static void qcs_consume(struct qcs *qcs, uint64_t bytes)
  */
 static int qcc_decode_qcs(struct qcc *qcc, struct qcs *qcs)
 {
+	struct ncbuf *buf;
 	struct buffer b;
 	ssize_t ret;
 	int fin = 0;
@@ -1166,7 +1181,8 @@ static int qcc_decode_qcs(struct qcc *qcc, struct qcs *qcs)
 
 	TRACE_ENTER(QMUX_EV_QCS_RECV, qcc->conn, qcs);
 
-	b = qcs_b_dup(&qcs->rx.rxbuf->ncbuf);
+	buf = qcs_first_rxbuf(qcs);
+	b = qcs_b_dup(buf);
 
 	/* Signal FIN to application if STREAM FIN received with all data. */
 	if (qcs_is_close_remote(qcs))
@@ -1585,17 +1601,17 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		}
 	}
 
-	if (!qcs->rx.rxbuf) {
+	if (eb_is_empty(&qcs->rx.rxbufs)) {
 		struct qcs_rxbuf *rxbuf;
 		rxbuf = malloc(sizeof(struct qcs_rxbuf));
 
 		rxbuf->ncbuf = NCBUF_NULL;
-		rxbuf->offset = qcs->rx.offset;
-		qcs->rx.rxbuf = rxbuf;
+		rxbuf->offset.key = qcs->rx.offset;
+		eb64_insert(&qcs->rx.rxbufs, &rxbuf->offset);
 		ncbuf = &rxbuf->ncbuf;
 	}
 	else {
-		ncbuf = &qcs->rx.rxbuf->ncbuf;
+		ncbuf = qcs_first_rxbuf(qcs);
 	}
 
 	if (!qcs_get_ncbuf(qcs, ncbuf) || ncb_is_null(ncbuf)) {
@@ -1826,7 +1842,8 @@ int qcc_recv_reset_stream(struct qcc *qcc, uint64_t id, uint64_t err, uint64_t f
 	 */
 	qcs->flags |= QC_SF_SIZE_KNOWN|QC_SF_RECV_RESET;
 	qcs_close_remote(qcs);
-	qcs_free_ncbuf(qcs);
+	while (!eb_is_empty(&qcs->rx.rxbufs))
+		qcs_free_ncbuf(qcs);
 
  out:
 	if (qcc->glitches != prev_glitches)
@@ -3368,7 +3385,7 @@ static size_t qmux_strm_rcv_buf(struct stconn *sc, struct buffer *buf,
 		/* Ensure DEM_FULL is only set if there is available data to
 		 * ensure we never do unnecessary wakeup here.
 		 */
-		BUG_ON(!qcs->rx.rxbuf || !ncb_data(&qcs->rx.rxbuf->ncbuf, 0));
+		BUG_ON(eb_is_empty(&qcs->rx.rxbufs) || !ncb_data(qcs_first_rxbuf(qcs), 0));
 
 		qcs->flags &= ~QC_SF_DEM_FULL;
 		if (!(qcc->flags & QC_CF_ERRL)) {
