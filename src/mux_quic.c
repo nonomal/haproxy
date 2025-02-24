@@ -44,18 +44,26 @@ static int qcc_is_pacing_active(const struct connection *conn)
 	return !(quic_tune.options & QUIC_TUNE_NO_PACING);
 }
 
-static void qcs_free_ncbuf(struct qcs *qcs, struct ncbuf *ncbuf)
+static void qcs_free_ncbuf(struct qcs *qcs)
 {
+	struct qcs_rxbuf *rxbuf;
+	struct ncbuf *ncbuf;
 	struct buffer buf;
 
-	if (ncb_is_null(ncbuf))
+	rxbuf = qcs->rx.rxbuf;
+	if (!rxbuf)
 		return;
 
-	buf = b_make(ncbuf->area, ncbuf->size, 0, 0);
-	b_free(&buf);
-	offer_buffers(NULL, 1);
+	ncbuf = &rxbuf->ncbuf;
 
-	*ncbuf = NCBUF_NULL;
+	if (!ncb_is_null(ncbuf)) {
+		buf = b_make(ncbuf->area, ncbuf->size, 0, 0);
+		b_free(&buf);
+		offer_buffers(NULL, 1);
+	}
+
+	free(rxbuf);
+	qcs->rx.rxbuf = NULL;
 
 	/* Reset DEM_FULL as buffer is released. This ensures mux is not woken
 	 * up from rcv_buf stream callback when demux was previously blocked.
@@ -97,7 +105,7 @@ static void qcs_free(struct qcs *qcs)
 	}
 
 	/* Free Rx buffer. */
-	qcs_free_ncbuf(qcs, &qcs->rx.ncbuf);
+	qcs_free_ncbuf(qcs);
 
 	/* Remove qcs from qcc tree. */
 	eb64_delete(&qcs->by_id);
@@ -152,7 +160,7 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 		qfctl_init(&qcs->tx.fc, 0);
 	}
 
-	qcs->rx.ncbuf = NCBUF_NULL;
+	qcs->rx.rxbuf = NULL;
 	qcs->rx.app_buf = BUF_NULL;
 	qcs->rx.offset = qcs->rx.offset_max = 0;
 	qcs->rx.underrun = 0;
@@ -1088,7 +1096,7 @@ static void qcs_consume(struct qcs *qcs, uint64_t bytes)
 {
 	struct qcc *qcc = qcs->qcc;
 	struct quic_frame *frm;
-	struct ncbuf *buf = &qcs->rx.ncbuf;
+	struct ncbuf *buf = &qcs->rx.rxbuf->ncbuf;
 	enum ncb_ret ret;
 
 	TRACE_ENTER(QMUX_EV_QCS_RECV, qcc->conn, qcs);
@@ -1099,7 +1107,7 @@ static void qcs_consume(struct qcs *qcs, uint64_t bytes)
 	}
 
 	if (ncb_is_empty(buf))
-		qcs_free_ncbuf(qcs, buf);
+		qcs_free_ncbuf(qcs);
 
 	qcs->rx.offset += bytes;
 	/* Not necessary to emit a MAX_STREAM_DATA if all data received. */
@@ -1158,7 +1166,7 @@ static int qcc_decode_qcs(struct qcc *qcc, struct qcs *qcs)
 
 	TRACE_ENTER(QMUX_EV_QCS_RECV, qcc->conn, qcs);
 
-	b = qcs_b_dup(&qcs->rx.ncbuf);
+	b = qcs_b_dup(&qcs->rx.rxbuf->ncbuf);
 
 	/* Signal FIN to application if STREAM FIN received with all data. */
 	if (qcs_is_close_remote(qcs))
@@ -1500,6 +1508,7 @@ int qcc_install_app_ops(struct qcc *qcc, const struct qcc_app_ops *app_ops)
 int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
              char fin, char *data)
 {
+	struct ncbuf *ncbuf;
 	struct qcs *qcs;
 	enum ncb_ret ret;
 
@@ -1576,7 +1585,20 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		}
 	}
 
-	if (!qcs_get_ncbuf(qcs, &qcs->rx.ncbuf) || ncb_is_null(&qcs->rx.ncbuf)) {
+	if (!qcs->rx.rxbuf) {
+		struct qcs_rxbuf *rxbuf;
+		rxbuf = malloc(sizeof(struct qcs_rxbuf));
+
+		rxbuf->ncbuf = NCBUF_NULL;
+		rxbuf->offset = qcs->rx.offset;
+		qcs->rx.rxbuf = rxbuf;
+		ncbuf = &rxbuf->ncbuf;
+	}
+	else {
+		ncbuf = &qcs->rx.rxbuf->ncbuf;
+	}
+
+	if (!qcs_get_ncbuf(qcs, ncbuf) || ncb_is_null(ncbuf)) {
 		TRACE_ERROR("receive ncbuf alloc failure", QMUX_EV_QCC_RECV|QMUX_EV_QCS_RECV, qcc->conn, qcs);
 		qcc_set_error(qcc, QC_ERR_INTERNAL_ERROR, 0);
 		goto err;
@@ -1592,7 +1614,7 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 	}
 
 	if (len) {
-		ret = ncb_add(&qcs->rx.ncbuf, offset - qcs->rx.offset, data, len, NCB_ADD_COMPARE);
+		ret = ncb_add(ncbuf, offset - qcs->rx.offset, data, len, NCB_ADD_COMPARE);
 		switch (ret) {
 		case NCB_RET_OK:
 			break;
@@ -1624,11 +1646,11 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		qcs->flags |= QC_SF_SIZE_KNOWN;
 
 	if (qcs->flags & QC_SF_SIZE_KNOWN &&
-	    qcs->rx.offset_max == qcs->rx.offset + ncb_data(&qcs->rx.ncbuf, 0)) {
+	    qcs->rx.offset_max == qcs->rx.offset + ncb_data(ncbuf, 0)) {
 		qcs_close_remote(qcs);
 	}
 
-	if ((ncb_data(&qcs->rx.ncbuf, 0) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
+	if ((ncb_data(ncbuf, 0) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
 		qcc_decode_qcs(qcc, qcs);
 		LIST_DEL_INIT(&qcs->el_recv);
 		qcc_refresh_timeout(qcc);
@@ -1804,7 +1826,7 @@ int qcc_recv_reset_stream(struct qcc *qcc, uint64_t id, uint64_t err, uint64_t f
 	 */
 	qcs->flags |= QC_SF_SIZE_KNOWN|QC_SF_RECV_RESET;
 	qcs_close_remote(qcs);
-	qcs_free_ncbuf(qcs, &qcs->rx.ncbuf);
+	qcs_free_ncbuf(qcs);
 
  out:
 	if (qcc->glitches != prev_glitches)
@@ -3346,7 +3368,7 @@ static size_t qmux_strm_rcv_buf(struct stconn *sc, struct buffer *buf,
 		/* Ensure DEM_FULL is only set if there is available data to
 		 * ensure we never do unnecessary wakeup here.
 		 */
-		BUG_ON(!ncb_data(&qcs->rx.ncbuf, 0));
+		BUG_ON(!qcs->rx.rxbuf || !ncb_data(&qcs->rx.rxbuf->ncbuf, 0));
 
 		qcs->flags &= ~QC_SF_DEM_FULL;
 		if (!(qcc->flags & QC_CF_ERRL)) {
