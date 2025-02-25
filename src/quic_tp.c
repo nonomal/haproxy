@@ -64,8 +64,8 @@ void quic_transport_params_init(struct quic_transport_params *p, int server)
 
 	p->initial_max_streams_bidi            = max_streams_bidi;
 	p->initial_max_streams_uni             = max_streams_uni;
-	p->initial_max_stream_data_bidi_local  = ncb_size;
-	p->initial_max_stream_data_bidi_remote = ncb_size;
+	p->initial_max_stream_data_bidi_local  = ncb_size * 20;
+	p->initial_max_stream_data_bidi_remote = ncb_size * 20;
 	p->initial_max_stream_data_uni         = ncb_size;
 	p->initial_max_data = (max_streams_bidi + max_streams_uni) * ncb_size;
 
