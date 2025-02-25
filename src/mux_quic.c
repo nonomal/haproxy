@@ -38,6 +38,8 @@ DECLARE_POOL(pool_head_qcs, "qcs", sizeof(struct qcs));
 static void qmux_ctrl_send(struct qc_stream_desc *, uint64_t data, uint64_t offset);
 static void qmux_ctrl_room(struct qc_stream_desc *, uint64_t room);
 
+#define QMUX_QCS_RXBUF_SZ (global.tune.bufsize - NCB_RESERVED_SZ)
+
 /* Returns true if pacing should be used for <conn> connection. */
 static int qcc_is_pacing_active(const struct connection *conn)
 {
@@ -52,7 +54,12 @@ static struct ncbuf *qcs_first_rxbuf(struct qcs *qcs)
 	node = eb64_first(&qcs->rx.rxbufs);
 	if (!node)
 		return NULL;
+
 	rxbuf = container_of(node, struct qcs_rxbuf, offset);
+	if (qcs->rx.offset < rxbuf->offset.key)
+		return NULL;
+
+	BUG_ON(rxbuf->offset.key + QMUX_QCS_RXBUF_SZ <= qcs->rx.offset);
 	return &rxbuf->ncbuf;
 }
 
@@ -1644,12 +1651,7 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		ncbuf = &rxbuf->ncbuf;
 	}
 
-	if (node && offset < rxbuf->offset.key + 16380 &&
-	    offset + len <= rxbuf->offset.key + 16380) {
-		fprintf(stderr, "Reusing rxbuf %llu (%llu:%llu)\n",
-		        (ullong)rxbuf->offset.key, (ullong)offset, (ullong)len);
-	}
-	else if (!node || offset >= rxbuf->offset.key + 16380) {
+	if (!node || offset >= rxbuf->offset.key + 16380) {
 		rxbuf = malloc(sizeof(struct qcs_rxbuf));
 
 		rxbuf->ncbuf = NCBUF_NULL;
@@ -1660,12 +1662,16 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		fprintf(stderr, "New rxbuf %llu (%llu:%llu)\n",
 		        (ullong)rxbuf->offset.key, (ullong)offset, (ullong)len);
 	}
-	else if (offset < rxbuf->offset.key + 16380 &&
-	         offset + len > rxbuf->offset.key + 16380) {
-		len_remaining = len - ((rxbuf->offset.key + 16380) - offset);
-		len = rxbuf->offset.key + 16380 - offset;
-		fprintf(stderr, "Reusing rxbuf %llu with remaining %llu (%llu:%llu)\n",
-		        (ullong)rxbuf->offset.key, (ullong)len_remaining, (ullong)offset, (ullong)len);
+	else {
+		fprintf(stderr, "Reusing rxbuf %llu (%llu:%llu)\n",
+		        (ullong)rxbuf->offset.key, (ullong)offset, (ullong)len);
+	}
+
+	if (offset + len > rxbuf->offset.key + QMUX_QCS_RXBUF_SZ) {
+		len_remaining = len - ((rxbuf->offset.key + QMUX_QCS_RXBUF_SZ) - offset);
+		len = rxbuf->offset.key + QMUX_QCS_RXBUF_SZ - offset;
+		fprintf(stderr, "Reducing length to %llu (remaining %llu)\n",
+		        (ullong)len, (ullong)len_remaining);
 	}
 
 	if (!qcs_get_ncbuf(qcs, ncbuf) || ncb_is_null(ncbuf)) {
