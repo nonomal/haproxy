@@ -63,6 +63,14 @@ static struct ncbuf *qcs_first_rxbuf(struct qcs *qcs)
 	return &rxbuf->ncbuf;
 }
 
+static ncb_sz_t qcs_rx_avail_data(struct qcs *qcs)
+{
+	struct ncbuf *ncbuf = qcs_first_rxbuf(qcs);
+	return ncbuf ? ncb_data(ncbuf, 0) : 0;
+}
+
+static void qcs_close_remote(struct qcs *qcs);
+
 static void qcs_free_ncbuf(struct qcs *qcs, int remove)
 {
 	struct eb64_node *node;
@@ -85,9 +93,16 @@ static void qcs_free_ncbuf(struct qcs *qcs, int remove)
 	rxbuf->ncbuf = NCBUF_NULL;
 
 	if (remove) {
+		ncb_sz_t avail;
 		fprintf(stderr, "Removing rxbuf %llu\n", (ullong)rxbuf->offset.key);
 		eb64_delete(node);
 		free(rxbuf);
+
+		avail = qcs_rx_avail_data(qcs);
+		if (avail && qcs->flags & QC_SF_SIZE_KNOWN) {
+			if (qcs->rx.offset + avail == qcs->rx.offset_max)
+				qcs_close_remote(qcs);
+		}
 	}
 
 	/* Reset DEM_FULL as buffer is released. This ensures mux is not woken
@@ -1137,11 +1152,11 @@ static void qcs_consume(struct qcs *qcs, uint64_t bytes)
 		ABORT_NOW(); /* should not happens because removal only in data */
 	}
 
+	qcs->rx.offset += bytes;
 	if (ncb_is_empty(buf))
-		qcs_free_ncbuf(qcs, ((qcs->rx.offset + bytes) % 16380) == 0);
+		qcs_free_ncbuf(qcs, (qcs->rx.offset % 16380) == 0);
 		//qcs_free_ncbuf(qcs, 0);
 
-	qcs->rx.offset += bytes;
 	fprintf(stderr, "Offset %llu (%llu) (%llu)\n", (ullong)qcs->rx.offset, (ullong)bytes, data);
 	if (qcs->flags & QC_SF_SIZE_KNOWN) {
 		//if (qcs->rx.offset == qcs->rx.offset_max)
@@ -1553,8 +1568,7 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 	struct ncbuf *ncbuf;
 	struct qcs *qcs;
 	enum ncb_ret ret;
-	uint64_t len_remaining = 0;
-	uint64_t offset_base;
+	uint64_t rxbuf_end, len_remaining = 0;
 
 	TRACE_ENTER(QMUX_EV_QCC_RECV, qcc->conn);
 
@@ -1649,14 +1663,15 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 	if (node) {
 		rxbuf = container_of(node, struct qcs_rxbuf, offset);
 		ncbuf = &rxbuf->ncbuf;
+		rxbuf_end = rxbuf->offset.key + QMUX_QCS_RXBUF_SZ;
 	}
 
-	if (!node || offset >= rxbuf->offset.key + 16380) {
+	if (!node || offset >= rxbuf_end) {
 		rxbuf = malloc(sizeof(struct qcs_rxbuf));
 
 		rxbuf->ncbuf = NCBUF_NULL;
-		//rxbuf->offset.key = qcs->rx.offset;
-		rxbuf->offset.key = offset - (offset % 16380);
+		rxbuf->offset.key = offset - (offset % QMUX_QCS_RXBUF_SZ);
+		rxbuf_end = rxbuf->offset.key + QMUX_QCS_RXBUF_SZ;
 		eb64_insert(&qcs->rx.rxbufs, &rxbuf->offset);
 		ncbuf = &rxbuf->ncbuf;
 		fprintf(stderr, "New rxbuf %llu (%llu:%llu)\n",
@@ -1667,9 +1682,9 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		        (ullong)rxbuf->offset.key, (ullong)offset, (ullong)len);
 	}
 
-	if (offset + len > rxbuf->offset.key + QMUX_QCS_RXBUF_SZ) {
-		len_remaining = len - ((rxbuf->offset.key + QMUX_QCS_RXBUF_SZ) - offset);
-		len = rxbuf->offset.key + QMUX_QCS_RXBUF_SZ - offset;
+	if (offset + len > rxbuf_end) {
+		len_remaining = len - (rxbuf_end - offset);
+		len -= len_remaining;
 		fprintf(stderr, "Reducing length to %llu (remaining %llu)\n",
 		        (ullong)len, (ullong)len_remaining);
 	}
@@ -1680,15 +1695,12 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		goto err;
 	}
 
-	if (&rxbuf->offset != eb64_first(&qcs->rx.rxbufs))
-		offset_base = rxbuf->offset.key;
-	else
-		offset_base = qcs->rx.offset;
-
 	if (len) {
-		//ret = ncb_add(ncbuf, offset - qcs->rx.offset, data, len, NCB_ADD_COMPARE);
-		//ret = ncb_add(ncbuf, offset - rxbuf->offset.key, data, len, NCB_ADD_COMPARE);
-		ret = ncb_add(ncbuf, offset - offset_base, data, len, NCB_ADD_COMPARE);
+		/* For oldest buffer, ncb_advance() may already have been performed. */
+		const ncb_sz_t ncb_off_rel =
+		  offset - MAX(qcs->rx.offset, rxbuf->offset.key);
+
+		ret = ncb_add(ncbuf, ncb_off_rel, data, len, NCB_ADD_COMPARE);
 		switch (ret) {
 		case NCB_RET_OK:
 			break;
@@ -1716,34 +1728,23 @@ int qcc_recv(struct qcc *qcc, uint64_t id, uint64_t len, uint64_t offset,
 		}
 	}
 
-	if (len_remaining) {
+	if (len_remaining)
 		goto reloop;
-	}
 
 	if (fin)
 		qcs->flags |= QC_SF_SIZE_KNOWN;
 
-#if 0
 	if (qcs->flags & QC_SF_SIZE_KNOWN &&
-	    //qcs->rx.offset_max == qcs->rx.offset + ncb_data(ncbuf, 0)) {
-	    //qcs->rx.offset_max == qcs->rx.offset + ncb_data(qcs_first_rxbuf(qcs), qcs->rx.offset % 16380)) {
-	    qcs->rx.offset_max == qcs->rx.offset + ncb_data(ncbuf, 0)) {
+	    qcs->rx.offset_max == qcs->rx.offset + qcs_rx_avail_data(qcs)) {
 		qcs_close_remote(qcs);
 	}
-#endif
 
-	//if ((ncb_data(ncbuf, 0) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
-	//if ((ncb_data(qcs_first_rxbuf(qcs), qcs->rx.offset % 16380) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
-	//if ((ncb_data(qcs_first_rxbuf(qcs), 0) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
-	while (qcs_first_rxbuf(qcs) && ncb_data(qcs_first_rxbuf(qcs), 0) && !(qcs->flags & QC_SF_DEM_FULL)) {
-		if (qcs->flags & QC_SF_SIZE_KNOWN &&
-		    qcs->rx.offset_max == qcs->rx.offset + ncb_data(qcs_first_rxbuf(qcs), 0)) {
-			if (!qcs_is_close_remote(qcs))
-				qcs_close_remote(qcs);
-		}
+	while ((qcs_rx_avail_data(qcs) && !(qcs->flags & QC_SF_DEM_FULL)) || fin) {
 		qcc_decode_qcs(qcc, qcs);
 		LIST_DEL_INIT(&qcs->el_recv);
 		qcc_refresh_timeout(qcc);
+
+		fin = 0; /* Reset fin to ensure we do not run an infinite loop. */
 	}
 
  out:
@@ -2812,22 +2813,12 @@ static int qcc_io_recv(struct qcc *qcc)
 		qcc_wait_for_hs(qcc);
 
 	while (!LIST_ISEMPTY(&qcc->recv_list)) {
-		struct ncbuf *ncbuf;
 		qcs = LIST_ELEM(qcc->recv_list.n, struct qcs *, el_recv);
 		/* No need to add an uni local stream in recv_list. */
 		BUG_ON(quic_stream_is_uni(qcs->id) && quic_stream_is_local(qcc, qcs->id));
 
-		while (1) {
-			ncbuf = qcs_first_rxbuf(qcs);
-			if (!ncbuf || ncb_is_null(ncbuf) || !ncb_data(ncbuf, 0) || (qcs->flags & QC_SF_DEM_FULL))
-				break;
-			if (qcs->flags & QC_SF_SIZE_KNOWN &&
-			    qcs->rx.offset_max == qcs->rx.offset + ncb_data(ncbuf, 0)) {
-				if (!qcs_is_close_remote(qcs))
-					qcs_close_remote(qcs);
-			}
+		while (qcs_rx_avail_data(qcs) && !(qcs->flags & QC_SF_DEM_FULL))
 			qcc_decode_qcs(qcc, qcs);
-		}
 		LIST_DEL_INIT(&qcs->el_recv);
 	}
 
@@ -3471,7 +3462,7 @@ static size_t qmux_strm_rcv_buf(struct stconn *sc, struct buffer *buf,
 		/* Ensure DEM_FULL is only set if there is available data to
 		 * ensure we never do unnecessary wakeup here.
 		 */
-		BUG_ON(eb_is_empty(&qcs->rx.rxbufs) || !ncb_data(qcs_first_rxbuf(qcs), 0));
+		BUG_ON(!qcs_rx_avail_data(qcs));
 
 		qcs->flags &= ~QC_SF_DEM_FULL;
 		if (!(qcc->flags & QC_CF_ERRL)) {
