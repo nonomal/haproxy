@@ -1393,3 +1393,42 @@ going to start with nbthread=12 nbtgroups=1
 [keep] thr=  9 -> cpu=  9 pk=00 no=-1 di=00 cl=000 ts=009 capa=984
 [keep] thr= 10 -> cpu= 10 pk=00 no=-1 di=00 cl=000 ts=010 capa=984
 [keep] thr= 11 -> cpu= 11 pk=00 no=-1 di=00 cl=000 ts=011 capa=1024
+########
+
+2025-02-25 - clarification on the configuration
+-----------------------------------------------
+
+The "two dimensions" above can in fact be summarized like this:
+
+  - exposing the ability for the user to perform the same as "taskset",
+    i.e. restrict the usage to a static subset of the CPUs. We could then
+    have "cpu-set only-node0", "0-39", "ignore-smt1", "ignore-little", etc.
+    => the user defines precise sets to be kept/evicted.
+
+  - then letting the user express what they want to do with the remaining
+    cores. This is a strategy/policy that is used to:
+      - count the optimal number of threads (when not forced), also keeping
+        in mind that it cannot be more than 32/64 * maxtgroups if set.
+      - sort CPUs by order of preference (for when threads are forced or
+        a thread-hard-limit is set).
+
+    It can, partially overlap with the first one. For example, the default
+    strategy could be to focus on a single node. If the user has limited its
+    usage to cores of both nodes, the policy could still further limit this.
+    But this time it should only be a matter of sorting and preference, i.e.
+    nbthread and cpuset are respected. If a policy prefers the node with more
+    cores first, it will sort them according to this, and its algorithm for
+    counting cores will only be used if nbthread is not set, otherwise it may
+    very well end up on two nodes to respect the user's choice.
+
+And once all of this is done, thread groups should be formed based on the
+remaining topology. Similarly, if the number of tgroups is not set, the
+algorithm must try to propose one based on the topology and the maxtgroups
+setting (i.e. find a divider of the #LLC that's lower than or equal to
+maxtgroups), otherwise the configured number of tgroups is respected. Then
+the number of LLCs will be divided by this number of tgroups, and as many
+threads as enabled CPUs of each LLC will be assigned to these respective
+groups.
+
+In the end we should have groups bound to cpu sets, and threads belonging
+to groups mapped to all accessible cpus of these groups.
