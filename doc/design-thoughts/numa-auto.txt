@@ -495,7 +495,12 @@ Analysis:
          but better use 8 groups of 2 than nothing).
 
        - otherwise if there's a single core per instance, it's unlikely
-         to be the LLC so we can imagine the LLC is unified.
+         to be the LLC so we can imagine the LLC is unified. Note that
+         some systems such as LX2/Armada8K (and Neoverse-N1 devices as
+         well) may have 2 cores per L2, yet this doesn't allow to infer
+         anything regarding the absence of an L3. Core2-quad has 2 cores
+         per L2 with no L3, like Armada8K. LX2 has 2 cores per L2 yet does
+         have an L3 which is not necessarily reported.
 
        - this needs to be done per {node,package} !
          => core_siblings and thread_siblings seem to be the only portable
@@ -1432,3 +1437,22 @@ groups.
 
 In the end we should have groups bound to cpu sets, and threads belonging
 to groups mapped to all accessible cpus of these groups.
+
+Note: clusters may be finer than LLCs because they could report finer
+information. We could have a big and a medium cluster share the same L3
+for example. However not all boards report their cluster number (see CIX-P1
+above). However the info about the capacity still allows to figure that and
+should probably be used for that. At this point it would seem logical to say
+that the cluster number is re-adjusted based on the claimed capacity, at
+least to avoid accidentally mixing workloads on heterogenous cores. But
+sorting by cluster number might not necessarily work if allocated randomly.
+So we might need a distinct metric that doesn't require to override the
+system's numbering, like a "set", "group", "team", "bond", "bunch", "club",
+"band", ... that would be first sorted based on LLC (and no finer), and
+second based on capacity, then on L2 etc. This way we should be able to
+respect topology when forming groups.
+
+Note: We need to consider as LLC a level which has more than one core!
+      Otherwise it's supposed to exist and be unique/shared but not reported.
+      => maybe this should be done very early when counting CPUs ?
+         We need to store the LLC level somewhere in the topo.
