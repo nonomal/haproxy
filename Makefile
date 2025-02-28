@@ -262,7 +262,7 @@ endif
 # DEBUG_NO_POOLS, DEBUG_FAIL_ALLOC, DEBUG_STRICT_ACTION=[0-3], DEBUG_HPACK,
 # DEBUG_AUTH, DEBUG_SPOE, DEBUG_UAF, DEBUG_THREAD, DEBUG_STRICT, DEBUG_DEV,
 # DEBUG_TASK, DEBUG_MEMORY_POOLS, DEBUG_POOL_TRACING, DEBUG_QPACK, DEBUG_LIST,
-# DEBUG_GLITCHES, DEBUG_STRESS.
+# DEBUG_GLITCHES, DEBUG_STRESS, DEBUG_UNIT.
 DEBUG =
 
 #### Trace options
@@ -988,7 +988,7 @@ OBJS += src/mux_h2.o src/mux_h1.o src/mux_fcgi.o src/log.o		\
         src/ebsttree.o src/freq_ctr.o src/systemd.o src/init.o		\
         src/http_acl.o src/dict.o src/dgram.o src/pipe.o		\
         src/hpack-huff.o src/hpack-enc.o src/ebtree.o src/hash.o	\
-        src/version.o
+        src/jws.o src/version.o
 
 ifneq ($(TRACE),)
   OBJS += src/calltrace.o
