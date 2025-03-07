@@ -121,7 +121,7 @@ static enum default_path_mode {
 	DEFAULT_PATH_ORIGIN,       /* "origin": paths are relative to default_path_origin */
 } default_path_mode;
 
-static char initial_cwd[PATH_MAX];
+char initial_cwd[PATH_MAX];
 static char current_cwd[PATH_MAX];
 
 /* List head of all known configuration keywords */
@@ -835,6 +835,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (strcmp(args[0], "peer") == 0 ||
 	         strcmp(args[0], "server") == 0) { /* peer or server definition */
+		struct server *prev_srv;
 		int local_peer, peer;
 		int parse_addr = 0;
 
@@ -885,17 +886,41 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		 * or if we are parsing a "server" line and the current peer is not the local one.
 		 */
 		parse_addr = (peer || !local_peer) ? SRV_PARSE_PARSE_ADDR : 0;
+		prev_srv = curpeers->peers_fe->srv;
 		err_code |= parse_server(file, linenum, args, curpeers->peers_fe, NULL,
 		                         SRV_PARSE_IN_PEER_SECTION|parse_addr|SRV_PARSE_INITIAL_RESOLVE);
-		if (!curpeers->peers_fe->srv) {
-			/* Remove the newly allocated peer. */
-			if (newpeer != curpeers->local) {
-				struct peer *p;
+		if (curpeers->peers_fe->srv == prev_srv) {
+			/* parse_server didn't add a server:
+			 * Remove the newly allocated peer.
+			 */
+			struct peer *p;
 
-				p = curpeers->remote;
-				curpeers->remote = curpeers->remote->next;
-				free(p->id);
-				free(p);
+			/* while it is tolerated to have a "server" line without address, it isn't
+			 * the case for a "peer" line
+			 */
+			if (peer) {
+				ha_warning("parsing [%s:%d] : '%s %s' : ignoring invalid peer definition (missing address:port)\n",
+				           file, linenum, args[0], args[1]);
+				err_code |= ERR_WARN;
+			}
+			else {
+				ha_diag_warning("parsing [%s:%d] : '%s %s' : ignoring server (not a local peer, valid address:port is expected)\n",
+				                file, linenum, args[0], args[1]);
+			}
+
+			p = curpeers->remote;
+			curpeers->remote = curpeers->remote->next;
+			free(p->id);
+			free(p);
+			if (local_peer) {
+				/* we only get there with incomplete "peer"
+				 * line for local peer (missing address):
+				 *
+				 * reset curpeers and curpeers fields
+				 * that are local peer related
+				 */
+				curpeers->local = NULL;
+				ha_free(&curpeers->peers_fe->id);
 			}
 			goto out;
 		}
@@ -2666,11 +2691,6 @@ section_parser:
 	if (nested_cond_lvl) {
 		ha_alert("parsing [%s:%d]: non-terminated '.if' block.\n", file, linenum);
 		err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
-	}
-
-	if (*initial_cwd && chdir(initial_cwd) == -1) {
-		ha_alert("Impossible to get back to initial directory '%s' : %s\n", initial_cwd, strerror(errno));
-		err_code |= ERR_ALERT | ERR_FATAL;
 	}
 
 err:
