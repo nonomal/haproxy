@@ -86,7 +86,8 @@ jobs:
           ${{ contains(matrix.FLAGS, 'USE_PCRE2=1')   && 'libpcre2-dev'   || '' }} \
           ${{ contains(matrix.ssl,   'BORINGSSL=yes') && 'ninja-build'    || '' }} \
           socat \
-          gdb
+          gdb \
+          jose
     - name: Install brew dependencies
       if: ${{ startsWith(matrix.os, 'macos-') }}
       run: |
@@ -117,7 +118,7 @@ jobs:
           ERR=1 \
           TARGET=${{ matrix.TARGET }} \
           CC=${{ matrix.CC }} \
-          DEBUG="-DDEBUG_POOL_INTEGRITY" \
+          DEBUG="-DDEBUG_POOL_INTEGRITY -DDEBUG_UNIT" \
           ${{ join(matrix.FLAGS, ' ') }} \
           ADDLIB="-Wl,-rpath,/usr/local/lib/ -Wl,-rpath,$HOME/opt/lib/"
         sudo make install
@@ -146,14 +147,6 @@ jobs:
         ulimit -n 65536
         ulimit -c unlimited
         make reg-tests VTEST_PROGRAM=../vtest/vtest REGTESTS_TYPES=default,bug,devel
-    - name: Config syntax check memleak smoke testing
-      if: ${{ contains(matrix.name, 'ASAN') }}
-      run: |
-        ./haproxy -dI -f .github/h2spec.config -c
-        ./haproxy -dI -f examples/content-sw-sample.cfg -c
-        ./haproxy -dI -f examples/option-http_proxy.cfg -c
-        ./haproxy -dI -f examples/quick-test.cfg -c
-        ./haproxy -dI -f examples/transparent_proxy.cfg -c
     - name: Show VTest results
       if: ${{ failure() && steps.vtest.outcome == 'failure' }}
       run: |
@@ -164,7 +157,19 @@ jobs:
           echo "::endgroup::"
         done
         exit 1
-
+    - name: Run Unit tests
+      id: unittests
+      run: |
+        make unit-tests
+    - name: Show Unit-Tests results
+      if: ${{ failure() && steps.unittests.outcome == 'failure' }}
+      run: |
+        for result in ${TMPDIR:-/tmp}/ha-unittests-*/results/res.*; do
+          printf "::group::"
+          cat $result
+          echo "::endgroup::"
+        done
+        exit 1
     - name: Show coredumps
       if: ${{ failure() && steps.vtest.outcome == 'failure' }}
       run: |

@@ -77,6 +77,7 @@
 #include <haproxy/connection.h>
 #ifdef USE_CPU_AFFINITY
 #include <haproxy/cpuset.h>
+#include <haproxy/cpu_topo.h>
 #endif
 #include <haproxy/debug.h>
 #include <haproxy/dns.h>
@@ -250,6 +251,11 @@ char **old_argv = NULL; /* previous argv but cleaned up */
 
 struct list proc_list = LIST_HEAD_INIT(proc_list);
 
+#ifdef DEBUG_UNIT
+struct list unittest_list = LIST_HEAD_INIT(unittest_list);
+static int unittest_argc = -1;
+#endif
+
 int master = 0; /* 1 if in master, 0 if in child */
 
 /* per-boot randomness */
@@ -395,6 +401,22 @@ void hap_register_feature(const char *name)
 	build_features = new_features;
 	must_free = 1;
 }
+
+#ifdef DEBUG_UNIT
+/* register a function that could be registered in "-U" argument */
+void hap_register_unittest(const char *name, int (*fct)(int argc, char **argv))
+{
+	struct unittest_fct *unit;
+
+	if (!name || !fct)
+		return;
+
+	unit = calloc(1, sizeof(*unit));
+	unit->fct = fct;
+	unit->name = name;
+	LIST_APPEND(&unittest_list, &unit->list);
+}
+#endif
 
 #define VERSION_MAX_ELTS  7
 
@@ -602,6 +624,10 @@ static void display_build_opts()
 
 	putchar('\n');
 
+#ifdef DEBUG_UNIT
+	list_unittests();
+	putchar('\n');
+#endif
 	list_pollers(stdout);
 	putchar('\n');
 	list_mux_proto(stdout);
@@ -662,6 +688,9 @@ static void usage(char *name)
 #endif
 #if defined(HA_HAVE_DUMP_LIBS)
 		"        -dL dumps loaded object files after config checks\n"
+#endif
+#if defined(USE_CPU_AFFINITY)
+		"        -dc dumps the list of selected and evicted CPUs\n"
 #endif
 		"        -dK{class[,...]} dump registered keywords (use 'help' for list)\n"
 		"        -dr ignores server address resolution failures\n"
@@ -1467,6 +1496,10 @@ static void init_args(int argc, char **argv)
 			else if (*flag == 'd' && flag[1] == 'R')
 				protocol_clrf_all(PROTO_F_REUSEPORT_SUPPORTED);
 #endif
+#if defined(USE_CPU_AFFINITY)
+			else if (*flag == 'd' && flag[1] == 'c')
+				global.tune.debug |= GDBG_CPU_AFFINITY;
+#endif
 			else if (*flag == 'd' && flag[1] == 'F')
 				global.tune.options &= ~GTUNE_USE_FAST_FWD;
 			else if (*flag == 'd' && flag[1] == 'I')
@@ -1629,6 +1662,19 @@ static void init_args(int argc, char **argv)
 					nb_oldpids++;
 				}
 			}
+#ifdef DEBUG_UNIT
+			else if (*flag == 'U')  {
+				if (argc <= 1) {
+					ha_alert("-U takes a least a unittest name in argument, and must be the last option\n");
+					usage(progname);
+				}
+				/* this is the last option, we keep the option position */
+				argv++;
+				argc--;
+				unittest_argc = argc;
+				break;
+			}
+#endif
 			else if (flag[0] == '-' && flag[1] == 0) { /* "--" */
 				/* now that's a cfgfile list */
 				argv++; argc--;
@@ -1912,7 +1958,6 @@ static void bind_listeners()
 		select(0, NULL, NULL, NULL, &w);
 		retry--;
 	}
-
 	/* Note: protocol_bind_all() sends an alert when it fails. */
 	if ((err & ~ERR_WARN) != ERR_NONE) {
 		ha_alert("[%s.main()] Some protocols failed to start their listeners! Exiting.\n", progname);
@@ -2012,9 +2057,34 @@ static void step_init_2(int argc, char** argv)
 	clock_adjust_now_offset();
 	ready_date = date;
 
+#ifdef USE_CPU_AFFINITY
+	/* we've already read the config and know what CPUs are expected
+	 * to be used. Let's check which of these are usable.
+	 */
+	cpu_detect_usable();
+
+	/* Now detect how CPUs are arranged */
+	cpu_detect_topology();
+
+	/* fixup missing info */
+	cpu_fixup_topology();
+
+	/* compose clusters */
+	cpu_compose_clusters();
+
+	/* refine topology-based CPU sets */
+	cpu_refine_cpusets();
+#endif
+
+	/* detect the optimal thread-groups and nbthreads if not set */
+	thread_detect_count();
 
 	/* Note: global.nbthread will be initialized as part of this call */
 	err_code |= check_config_validity();
+	if (*initial_cwd && chdir(initial_cwd) == -1) {
+		ha_alert("Impossible to get back to initial directory '%s' : %s\n", initial_cwd, strerror(errno));
+		exit(1);
+	}
 
 	/* update the ready date to also account for the check time */
 	clock_update_date(0, 1);
@@ -3133,6 +3203,26 @@ int main(int argc, char **argv)
 	 */
 	step_init_1();
 
+	/* call a function to be called with -U in order to make some tests */
+#ifdef DEBUG_UNIT
+	if (unittest_argc > -1) {
+		struct unittest_fct *unit;
+		int ret = 1;
+		int argc_start = argc - unittest_argc;
+
+		list_for_each_entry(unit, &unittest_list, list) {
+
+			if (strcmp(unit->name, argv[argc_start]) == 0) {
+				ret = unit->fct(unittest_argc, argv + argc_start);
+				break;
+			}
+		}
+
+		exit(ret);
+	}
+#endif
+
+
 	/* deserialize processes list, if we do reload in master-worker mode */
 	if ((getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
 		if (mworker_env_to_proc_list() < 0) {
@@ -3377,8 +3467,8 @@ int main(int argc, char **argv)
 #if defined(USE_LINUX_CAP)
 			ha_alert("[%s.main()] Alternately, if your system supports "
 			         "Linux capabilities, you may also consider using "
-			         "'setcap cap_net_raw' or 'setcap cap_net_admin' in the "
-			         "'global' section.\n", argv[0]);
+			         "'setcap cap_net_raw', 'setcap cap_net_admin' or "
+			         "'setcap cap_sys_admin' in the 'global' section.\n", argv[0]);
 #endif
 			protocol_unbind_all();
 			exit(1);

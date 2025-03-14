@@ -1349,7 +1349,7 @@ static int postcheck_log_backend(struct proxy *be)
 	if (err_code & ERR_CODE)
 		return err_code;
 
-	/* "log-balance hash" needs to compile its expression */
+	/* "balance log-hash" needs to compile its expression */
 	if ((be->lbprm.algo & BE_LB_ALGO) == BE_LB_ALGO_LH) {
 		struct sample_expr *expr;
 		char *expr_str = NULL;
@@ -1374,7 +1374,7 @@ static int postcheck_log_backend(struct proxy *be)
 		 */
 		memprintf(&expr_str, "str(dummy),%s", be->lbprm.arg_str);
 		if (!expr_str) {
-			memprintf(&msg, "memory error during converter list argument parsing (from \"log-balance hash\")");
+			memprintf(&msg, "memory error during converter list argument parsing (from \"balance log-hash\")");
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto end;
 		}
@@ -1383,7 +1383,7 @@ static int postcheck_log_backend(struct proxy *be)
 		                         be->conf.line,
 		                         &err_str, NULL, NULL);
 		if (!expr) {
-			memprintf(&msg, "%s (from converter list argument in \"log-balance hash\")", err_str);
+			memprintf(&msg, "%s (from converter list argument in \"balance log-hash\")", err_str);
 			ha_free(&err_str);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			ha_free(&expr_str);
@@ -1398,7 +1398,7 @@ static int postcheck_log_backend(struct proxy *be)
 		 * error to prevent unexpected results during runtime.
 		 */
 		if (sample_casts[smp_expr_output_type(expr)][SMP_T_BIN] == NULL) {
-			memprintf(&msg, "invalid output type at the end of converter list for \"log-balance hash\" directive");
+			memprintf(&msg, "invalid output type at the end of converter list for \"balance log-hash\" directive");
 			err_code |= ERR_ALERT | ERR_FATAL;
 			release_sample_expr(expr);
 			ha_free(&expr_str);
@@ -2863,13 +2863,12 @@ static inline void __do_send_log_backend(struct proxy *be, struct log_header hdr
 	else if ((be->lbprm.algo & BE_LB_ALGO) == BE_LB_ALGO_LH) {
 		struct sample result;
 
-		/* log-balance hash */
+		/* balance log-hash */
 		memset(&result, 0, sizeof(result));
 		result.data.type = SMP_T_STR;
 		result.flags = SMP_F_CONST;
 		result.data.u.str.area = message;
-		result.data.u.str.data = size;
-		result.data.u.str.size = size + 1; /* with terminating NULL byte */
+		result.data.u.str.data = result.data.u.str.size = size;
 		if (sample_process_cnv(be->lbprm.expr, &result)) {
 			/* gen_hash takes binary input, ensure that we provide such value to it */
 			if (result.data.type == SMP_T_BIN || sample_casts[result.data.type][SMP_T_BIN]) {
@@ -2913,6 +2912,9 @@ struct process_send_log_ctx {
 static inline void _process_send_log_final(struct logger *logger, struct log_header hdr,
                                            char *message, size_t size, int nblogger)
 {
+	if (!size)
+		return; // don't try to send empty message
+
 	if (logger->target.type == LOG_TARGET_BACKEND) {
 		__do_send_log_backend(logger->target.be, hdr, nblogger, logger->maxlen, message, size);
 	}
@@ -5189,6 +5191,7 @@ out:
  */
 void do_log(struct session *sess, struct stream *s, struct log_orig origin)
 {
+	struct process_send_log_ctx ctx;
 	int size;
 	int sd_size = 0;
 	int level = -1;
@@ -5223,15 +5226,12 @@ void do_log(struct session *sess, struct stream *s, struct log_orig origin)
 	}
 
 	size = sess_build_logline_orig(sess, s, logline, global.max_syslog_len, &sess->fe->logformat, origin);
-	if (size > 0) {
-		struct process_send_log_ctx ctx;
 
-		ctx.origin = origin;
-		ctx.sess = sess;
-		ctx.stream = s;
-		__send_log(&ctx, &sess->fe->loggers, &sess->fe->log_tag, level,
-			   logline, size + 1, logline_rfc5424, sd_size);
-	}
+	ctx.origin = origin;
+	ctx.sess = sess;
+	ctx.stream = s;
+	__send_log(&ctx, &sess->fe->loggers, &sess->fe->log_tag, level,
+		   logline, size, logline_rfc5424, sd_size);
 }
 
 /*
@@ -5240,6 +5240,7 @@ void do_log(struct session *sess, struct stream *s, struct log_orig origin)
  */
 void strm_log(struct stream *s, struct log_orig origin)
 {
+	struct process_send_log_ctx ctx;
 	struct session *sess = s->sess;
 	int size, err, level;
 	int sd_size = 0;
@@ -5281,17 +5282,14 @@ void strm_log(struct stream *s, struct log_orig origin)
 	}
 
 	size = build_logline_orig(s, logline, global.max_syslog_len, &sess->fe->logformat, origin);
-	if (size > 0) {
-		struct process_send_log_ctx ctx;
 
-		_HA_ATOMIC_INC(&sess->fe->log_count);
-		ctx.origin = origin;
-		ctx.sess = sess;
-		ctx.stream = s;
-		__send_log(&ctx, &sess->fe->loggers, &sess->fe->log_tag, level,
-			   logline, size + 1, logline_rfc5424, sd_size);
-		s->logs.logwait = 0;
-	}
+	_HA_ATOMIC_INC(&sess->fe->log_count);
+	ctx.origin = origin;
+	ctx.sess = sess;
+	ctx.stream = s;
+	__send_log(&ctx, &sess->fe->loggers, &sess->fe->log_tag, level,
+		   logline, size, logline_rfc5424, sd_size);
+	s->logs.logwait = 0;
 }
 
 /*
@@ -5309,6 +5307,7 @@ void strm_log(struct stream *s, struct log_orig origin)
  */
 void _sess_log(struct session *sess, int embryonic)
 {
+	struct process_send_log_ctx ctx;
 	int size, level;
 	int sd_size = 0;
 	struct log_orig orig;
@@ -5350,17 +5349,14 @@ void _sess_log(struct session *sess, int embryonic)
 		session_embryonic_build_legacy_err(sess, &buf);
 		size = buf.data;
 	}
-	if (size > 0) {
-		struct process_send_log_ctx ctx;
 
-		_HA_ATOMIC_INC(&sess->fe->log_count);
-		ctx.origin = orig;
-		ctx.sess = sess;
-		ctx.stream = NULL;
-		__send_log(&ctx, &sess->fe->loggers,
-		           &sess->fe->log_tag, level,
-			   logline, size + 1, logline_rfc5424, sd_size);
-	}
+	_HA_ATOMIC_INC(&sess->fe->log_count);
+	ctx.origin = orig;
+	ctx.sess = sess;
+	ctx.stream = NULL;
+	__send_log(&ctx, &sess->fe->loggers,
+	           &sess->fe->log_tag, level,
+		   logline, size, logline_rfc5424, sd_size);
 }
 
 void app_log(struct list *loggers, struct buffer *tag, int level, const char *format, ...)
@@ -5379,6 +5375,24 @@ void app_log(struct list *loggers, struct buffer *tag, int level, const char *fo
 
 	__send_log(NULL, loggers, tag, level, logline, data_len, default_rfc5424_sd_log_format, 2);
 }
+
+/*
+ * This function sets up the initial state for a log message by preparing
+ * the buffer, setting default values for the log level and facility, and
+ * initializing metadata fields. It is used before parsing or constructing
+ * a log message to ensure all fields are in a known state.
+ */
+static void prepare_log_message(char *buf, size_t buflen, int *level, int *facility,
+                                struct ist *metadata, char **message, size_t *size)
+{
+	*level = *facility = -1;
+
+	*message = buf;
+	*size = buflen;
+
+	memset(metadata, 0, LOG_META_FIELDS*sizeof(struct ist));
+}
+
 /*
  * This function parse a received log message <buf>, of size <buflen>
  * it fills <level>, <facility> and <metadata> depending of the detected
@@ -5394,13 +5408,6 @@ void parse_log_message(char *buf, size_t buflen, int *level, int *facility,
 
 	char *p;
 	int fac_level = 0;
-
-	*level = *facility = -1;
-
-	*message = buf;
-	*size = buflen;
-
-	memset(metadata, 0, LOG_META_FIELDS*sizeof(struct ist));
 
 	p = buf;
 	if (*size < 2 || *p != '<')
@@ -5704,22 +5711,84 @@ bad_format:
 	return;
 }
 
+/* helper function for syslog handlers: process input message sent by
+ * <saddr> and stored in <buf> according to <frontend> options, and send
+ * it to frontend loggers
+ *
+ * <saddr> may be NULL if sender information is not available.
+ */
+static void syslog_process_message(struct proxy *frontend, struct listener *l,
+                                   const struct sockaddr_storage *saddr,
+                                   struct buffer *buf)
+{
+	static THREAD_LOCAL struct ist metadata[LOG_META_FIELDS];
+	char *src_addr = NULL;
+	size_t size;
+	char *message;
+	int level;
+	int facility;
+
+	/* update counters */
+	_HA_ATOMIC_INC(&cum_log_messages);
+	proxy_inc_fe_req_ctr(l, frontend, 0);
+
+	prepare_log_message(buf->area, buf->data, &level, &facility, metadata, &message, &size);
+
+	if (frontend->options3 & PR_O3_DONTPARSELOG)
+		goto end;
+
+	parse_log_message(buf->area, buf->data, &level, &facility, metadata, &message, &size);
+
+	if (real_family(saddr->ss_family) == AF_UNIX)
+		saddr = NULL; /* no source information for UNIX addresses */
+
+	/* handle host options */
+	if (!(frontend->options3 & PR_O3_LOGF_HOST_KEEP)) {
+		if (saddr)
+			src_addr = sa2str(saddr, -1, 0);
+
+		if ((frontend->options3 & PR_O3_LOGF_HOST_REPLACE) && src_addr) {
+			/* unconditional replace, unless source is not available */
+			metadata[LOG_META_HOST] = ist(src_addr);
+		}
+		else if ((frontend->options3 & PR_O3_LOGF_HOST_FILL) &&
+		          src_addr && !metadata[LOG_META_HOST].len) {
+			/* only fill if missing */
+			metadata[LOG_META_HOST] = ist(src_addr);
+		}
+		else if ((frontend->options3 & PR_O3_LOGF_HOST_APPEND) && src_addr) {
+			/* append source after existing host */
+			if (metadata[LOG_META_HOST].len) {
+				memprintf(&src_addr, "%.*s,%s",
+				          (int)metadata[LOG_META_HOST].len,
+				          metadata[LOG_META_HOST].ptr, src_addr);
+				if (src_addr)
+					metadata[LOG_META_HOST] = ist(src_addr);
+			}
+			else
+				metadata[LOG_META_HOST] = ist(src_addr);
+		}
+	}
+	// else nothing to do
+
+ end:
+	process_send_log(NULL, &frontend->loggers, level, facility, metadata, message, size);
+	ha_free(&src_addr);
+}
+
 /*
  * UDP syslog fd handler
  */
 void syslog_fd_handler(int fd)
 {
-	static THREAD_LOCAL struct ist metadata[LOG_META_FIELDS];
 	ssize_t ret = 0;
 	struct buffer *buf = get_trash_chunk();
-	size_t size;
-	char *message;
-	int level;
-	int facility;
 	struct listener *l = objt_listener(fdtab[fd].owner);
+	struct proxy *frontend;
 	int max_accept;
 
 	BUG_ON(!l);
+	frontend = l->bind_conf->frontend;
 
 	if (fdtab[fd].state & FD_POLL_IN) {
 
@@ -5745,14 +5814,7 @@ void syslog_fd_handler(int fd)
 			}
 			buf->data = ret;
 
-			/* update counters */
-			_HA_ATOMIC_INC(&cum_log_messages);
-			proxy_inc_fe_req_ctr(l, l->bind_conf->frontend, 0);
-
-			parse_log_message(buf->area, buf->data, &level, &facility, metadata, &message, &size);
-
-			process_send_log(NULL, &l->bind_conf->frontend->loggers, level, facility, metadata, message, size);
-
+			syslog_process_message(frontend, l, &saddr, buf);
 		} while (--max_accept);
 	}
 
@@ -5765,18 +5827,14 @@ out:
  */
 static void syslog_io_handler(struct appctx *appctx)
 {
-	static THREAD_LOCAL struct ist metadata[LOG_META_FIELDS];
 	struct stconn *sc = appctx_sc(appctx);
 	struct stream *s = __sc_strm(sc);
 	struct proxy *frontend = strm_fe(s);
 	struct listener *l = strm_li(s);
 	struct buffer *buf = get_trash_chunk();
+	struct connection *conn;
 	int max_accept;
 	int to_skip;
-	int facility;
-	int level;
-	char *message;
-	size_t size;
 
 	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR)))) {
 		co_skip(sc_oc(sc), co_data(sc_oc(sc)));
@@ -5785,6 +5843,7 @@ static void syslog_io_handler(struct appctx *appctx)
 
 	max_accept = l->bind_conf->maxaccept ? l->bind_conf->maxaccept : 1;
 	while (1) {
+		const struct sockaddr_storage *saddr = NULL;
 		char c;
 
 		if (max_accept <= 0)
@@ -5797,7 +5856,7 @@ static void syslog_io_handler(struct appctx *appctx)
 		else if (to_skip < 0)
 			goto cli_abort;
 
-		if (c == '<') {
+		if (c == '<' || (frontend->options3 & PR_O3_ASSUME_RFC6587_NTF)) {
 			/* rfc-6587, Non-Transparent-Framing: messages separated by
 			 * a trailing LF or CR LF
 			 */
@@ -5857,14 +5916,11 @@ static void syslog_io_handler(struct appctx *appctx)
 
 		co_skip(sc_oc(sc), to_skip);
 
-		/* update counters */
-		_HA_ATOMIC_INC(&cum_log_messages);
-		proxy_inc_fe_req_ctr(l, frontend, 0);
+		conn = sc_conn(s->scf);
+		if (conn && conn_get_src(conn))
+			saddr = conn_src(conn);
 
-		parse_log_message(buf->area, buf->data, &level, &facility, metadata, &message, &size);
-
-		process_send_log(NULL, &frontend->loggers, level, facility, metadata, message, size);
-
+		syslog_process_message(frontend, l, saddr, buf);
 	}
 
 missing_data:
@@ -6014,6 +6070,7 @@ int cfg_parse_log_forward(const char *file, int linenum, char **args, int kwm)
 		px->accept = frontend_accept;
 		px->default_target = &syslog_applet.obj_type;
 		px->id = strdup(args[1]);
+		px->options3 |= PR_O3_LOGF_HOST_FILL;
 	}
 	else if (strcmp(args[0], "maxconn") == 0) {  /* maxconn */
 		if (warnifnotcap(cfg_log_forward, PR_CAP_FE, file, linenum, args[0], " Maybe you want 'fullconn' instead ?"))
@@ -6190,6 +6247,63 @@ int cfg_parse_log_forward(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		cfg_log_forward->timeout.client = MS_TO_TICKS(timeout);
+	}
+	else if (strcmp(args[0], "option") == 0) {
+		if (*(args[1]) == '\0') {
+			ha_alert("parsing [%s:%d]: '%s' expects an option name.\n",
+				 file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		/* only consider options that are frontend oriented and log oriented, such options may be set
+		 * in px->options2 because px->options is already full of tcp/http oriented options
+		 */
+		if (cfg_parse_listen_match_option(file, linenum, kwm, cfg_opts3, &err_code, args,
+		                                  PR_MODE_SYSLOG, PR_CAP_FE,
+		                                  &cfg_log_forward->options3, &cfg_log_forward->no_options3))
+			goto out;
+
+		if (err_code & ERR_CODE)
+			goto out;
+
+
+		if (strcmp(args[1], "host") == 0) {
+			int value = 0;
+
+			if (strcmp(args[2], "replace") == 0)
+				value = PR_O3_LOGF_HOST_REPLACE;
+			else if (strcmp(args[2], "fill") == 0)
+				value = PR_O3_LOGF_HOST_FILL;
+			else if (strcmp(args[2], "keep") == 0)
+				value = PR_O3_LOGF_HOST_KEEP;
+			else if (strcmp(args[2], "append") == 0)
+				value = PR_O3_LOGF_HOST_APPEND;
+
+			if (!value) {
+				ha_alert("parsing [%s:%d] : option 'host' expects {replace|fill|keep|append}.\n", file, linenum);
+				err_code |= ERR_ALERT | ERR_ABORT;
+				goto out;
+			}
+
+			cfg_log_forward->options3 &= ~PR_O3_LOGF_HOST;
+			cfg_log_forward->no_options3 &= ~PR_O3_LOGF_HOST;
+
+			switch (kwm) {
+				case KWM_STD:
+					cfg_log_forward->options3 |= value;
+					break;
+				case KWM_NO:
+					cfg_log_forward->no_options3 |= value;
+					break;
+				case KWM_DEF: /* already cleared */
+					break;
+			}
+			goto out;
+		}
+
+		ha_alert("parsing [%s:%d] : unknown option '%s' in log-forward section.\n", file, linenum, args[1]);
+		err_code |= ERR_ALERT | ERR_ABORT;
 	}
 	else {
 		ha_alert("parsing [%s:%d] : unknown keyword '%s' in log-forward section.\n", file, linenum, args[0]);

@@ -201,6 +201,7 @@ endif
 #### May be used to force running a specific set of reg-tests
 REG_TEST_FILES =
 REG_TEST_SCRIPT=./scripts/run-regtests.sh
+UNIT_TEST_SCRIPT=./scripts/run-unittests.sh
 
 #### Standard C definition
 # Compiler-specific flags that may be used to set the standard behavior we
@@ -262,7 +263,7 @@ endif
 # DEBUG_NO_POOLS, DEBUG_FAIL_ALLOC, DEBUG_STRICT_ACTION=[0-3], DEBUG_HPACK,
 # DEBUG_AUTH, DEBUG_SPOE, DEBUG_UAF, DEBUG_THREAD, DEBUG_STRICT, DEBUG_DEV,
 # DEBUG_TASK, DEBUG_MEMORY_POOLS, DEBUG_POOL_TRACING, DEBUG_QPACK, DEBUG_LIST,
-# DEBUG_GLITCHES, DEBUG_STRESS.
+# DEBUG_GLITCHES, DEBUG_STRESS, DEBUG_UNIT.
 DEBUG =
 
 #### Trace options
@@ -595,6 +596,7 @@ endif
 
 ifneq ($(USE_CPU_AFFINITY:0=),)
   OPTIONS_OBJS   += src/cpuset.o
+  OPTIONS_OBJS   += src/cpu_topo.o
 endif
 
 # OpenSSL is packaged in various forms and with various dependencies.
@@ -627,7 +629,9 @@ ifneq ($(USE_OPENSSL:0=),)
     SSL_LDFLAGS   := $(if $(SSL_LIB),-L$(SSL_LIB)) -lssl -lcrypto
   endif
   USE_SSL         := $(if $(USE_SSL:0=),$(USE_SSL:0=),implicit)
-  OPTIONS_OBJS += src/ssl_sock.o src/ssl_ckch.o src/ssl_ocsp.o src/ssl_crtlist.o src/ssl_sample.o src/cfgparse-ssl.o src/ssl_gencert.o src/ssl_utils.o src/jwt.o src/ssl_clienthello.o
+  OPTIONS_OBJS += src/ssl_sock.o src/ssl_ckch.o src/ssl_ocsp.o src/ssl_crtlist.o     \
+                  src/ssl_sample.o src/cfgparse-ssl.o src/ssl_gencert.o              \
+                  src/ssl_utils.o src/jwt.o src/ssl_clienthello.o src/jws.o
 endif
 
 ifneq ($(USE_ENGINE:0=),)
@@ -654,7 +658,7 @@ OPTIONS_OBJS += src/mux_quic.o src/h3.o src/quic_rx.o src/quic_tx.o	\
                 src/quic_cc_nocc.o src/quic_cc.o src/quic_pacing.o	\
                 src/h3_stats.o src/quic_stats.o src/qpack-enc.o		\
                 src/qpack-tbl.o src/quic_cc_drs.o src/quic_fctl.o	\
-                src/cbuf.o
+                src/cbuf.o src/quic_enc.o
 endif
 
 ifneq ($(USE_QUIC_OPENSSL_COMPAT:0=),)
@@ -1021,7 +1025,7 @@ help:
 # TARGET variable is not set since we're not building, by definition.
 IGNORE_OPTS=help install install-man install-doc install-bin \
 	uninstall clean tags cscope tar git-tar version update-version \
-	opts reg-tests reg-tests-help admin/halog/halog dev/flags/flags \
+	opts reg-tests reg-tests-help unit-tests admin/halog/halog dev/flags/flags \
 	dev/haring/haring dev/ncpu/ncpu dev/poll/poll dev/tcploop/tcploop \
 	dev/term_events/term_events
 
@@ -1264,6 +1268,11 @@ reg-tests-help:
 	@echo "(see --help option of this script for more information)."
 
 .PHONY: reg-tests reg-tests-help
+
+unit-tests:
+	$(Q)$(UNIT_TEST_SCRIPT)
+.PHONY: unit-tests
+
 
 # "make range" iteratively builds using "make all" and the exact same build
 # options for all commits within RANGE. RANGE may be either a git range
